@@ -29,7 +29,7 @@ dependencies = [
  "mio-more 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "notify 4.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "num 0.1.40 (registry+https://github.com/rust-lang/crates.io-index)",
- "owned_slice 0.1.0 (git+https://github.com/neon64/owned-slice)",
+ "owned_slice 0.1.0",
  "parking_lot 0.4.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde 1.0.17 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_derive 1.0.17 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -965,7 +965,6 @@ dependencies = [
 [[package]]
 name = "owned_slice"
 version = "0.1.0"
-source = "git+https://github.com/neon64/owned-slice#de93e6cb0ddb9ad5371d961b77140b42e4c4456a"
 dependencies = [
  "num 0.1.40 (registry+https://github.com/rust-lang/crates.io-index)",
 ]

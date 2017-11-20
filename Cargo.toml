@@ -35,7 +35,7 @@ unicode-width = "0.1"
 arraydeque = "0.2"
 glutin = "0.10"
 clippy = { version = "*", optional = true }
-owned_slice = { git = "https://github.com/neon64/owned-slice" }
+owned_slice = { path = "./owned-slice" }
 num = "0.1"
 env_logger = "0.4"
 
