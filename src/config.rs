@@ -24,7 +24,7 @@ use notify::{Watcher, watcher, DebouncedEvent, RecursiveMode};
 use glutin::ModifiersState;
 
 use input::{Action, Binding, MouseBinding, KeyBinding};
-use index::{Line, Column};
+use index::{AbsoluteLine, Line, Column};
 
 use util::fmt::Yellow;
 
@@ -219,6 +219,10 @@ pub struct Config {
     #[serde(default)]
     dimensions: Dimensions,
 
+    /// Maximum size of the scrollback buffer
+    #[serde(default)]
+    scrollback: Scrollback,
+
     /// Pixel padding
     #[serde(default="default_padding")]
     padding: Delta,
@@ -315,6 +319,7 @@ impl Default for Config {
         Config {
             draw_bold_text_with_bright_colors: true,
             dimensions: Default::default(),
+            scrollback: Default::default(),
             font: Default::default(),
             render_timer: Default::default(),
             custom_cursor_colors: false,
@@ -333,6 +338,25 @@ impl Default for Config {
             padding: default_padding(),
         }
     }
+}
+
+#[derive(Copy, Clone, Debug, Deserialize)]
+pub struct Scrollback {
+    pub enabled: bool,
+    #[serde(default="default_max_scrollback_lines")]
+    pub max_lines: AbsoluteLine
+}
+
+impl Default for Scrollback {
+    fn default() -> Scrollback {
+        Scrollback {
+            enabled: true,
+            max_lines: default_max_scrollback_lines()
+        }
+    }
+}
+fn default_max_scrollback_lines() -> AbsoluteLine {
+    AbsoluteLine(10000)
 }
 
 /// Newtype for implementing deserialize on glutin Mods
@@ -400,7 +424,7 @@ impl<'a> de::Deserialize<'a> for ActionWrapper {
             type Value = ActionWrapper;
 
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("Paste, Copy, PasteSelection, IncreaseFontSize, DecreaseFontSize, ResetFontSize, or Quit")
+                f.write_str("Paste, Copy, PasteSelection, IncreaseFontSize, DecreaseFontSize, ResetFontSize, Quit, ScrollUp, ScrollDown, PageUp, or PageDown")
             }
 
             fn visit_str<E>(self, value: &str) -> ::std::result::Result<ActionWrapper, E>
@@ -414,6 +438,10 @@ impl<'a> de::Deserialize<'a> for ActionWrapper {
                     "DecreaseFontSize" => Action::DecreaseFontSize,
                     "ResetFontSize" => Action::ResetFontSize,
                     "Quit" => Action::Quit,
+                    "ScrollUp" => Action::ScrollUp,
+                    "ScrollDown" => Action::ScrollDown,
+                    "PageUp" => Action::PageUp,
+                    "PageDown" => Action::PageDown,
                     _ => return Err(E::invalid_value(Unexpected::Str(value), &self)),
                 }))
             }
@@ -463,10 +491,10 @@ impl<'a> de::Deserialize<'a> for ModeWrapper {
 
                 for modifier in value.split('|') {
                     match modifier.trim() {
-                        "AppCursor" => res.mode |= mode::APP_CURSOR,
-                        "~AppCursor" => res.not_mode |= mode::APP_CURSOR,
-                        "AppKeypad" => res.mode |= mode::APP_KEYPAD,
-                        "~AppKeypad" => res.not_mode |= mode::APP_KEYPAD,
+                        "AppCursor" => res.mode |= mode::TermMode::APP_CURSOR,
+                        "~AppCursor" => res.not_mode |= mode::TermMode::APP_CURSOR,
+                        "AppKeypad" => res.mode |= mode::TermMode::APP_KEYPAD,
+                        "~AppKeypad" => res.not_mode |= mode::TermMode::APP_KEYPAD,
                         _ => eprintln!("unknown mode {:?}", modifier),
                     }
                 }
@@ -1097,6 +1125,10 @@ impl Config {
     #[inline]
     pub fn background_opacity(&self) -> Alpha {
         self.background_opacity
+    }
+
+    pub fn scrollback(&self) -> Scrollback {
+        self.scrollback
     }
 
     pub fn key_bindings(&self) -> &[KeyBinding] {

@@ -38,9 +38,7 @@ use core_text::font_descriptor::kCTFontVerticalOrientation;
 use core_text::font_descriptor::{CTFontDescriptor, CTFontDescriptorRef, CTFontOrientation};
 use core_text::font_descriptor::SymbolicTraitAccessors;
 
-use euclid::point::Point2D;
-use euclid::rect::Rect;
-use euclid::size::Size2D;
+use euclid::{Point2D, Rect, Size2D};
 
 use super::{FontDesc, RasterizedGlyph, Metrics, FontKey, GlyphKey};
 

@@ -29,7 +29,7 @@ use glutin::ModifiersState;
 
 use config;
 use event::{ClickState, Mouse};
-use index::{Line, Column, Side, Point};
+use index::{Line, AbsoluteLine, Column, Side, Point, AbsolutePoint};
 use term::SizeInfo;
 use term::mode::{self, TermMode};
 use util::fmt::Red;
@@ -53,17 +53,21 @@ pub trait ActionContext {
     fn size_info(&self) -> SizeInfo;
     fn copy_selection(&self, Buffer);
     fn clear_selection(&mut self);
-    fn update_selection(&mut self, point: Point, side: Side);
-    fn simple_selection(&mut self, point: Point, side: Side);
-    fn semantic_selection(&mut self, point: Point);
-    fn line_selection(&mut self, point: Point);
+    fn update_selection(&mut self, point: AbsolutePoint, side: Side);
+    fn simple_selection(&mut self, point: AbsolutePoint, side: Side);
+    fn semantic_selection(&mut self, point: AbsolutePoint);
+    fn line_selection(&mut self, point: AbsolutePoint);
     fn mouse_mut(&mut self) -> &mut Mouse;
     fn mouse_coords(&self) -> Option<Point>;
+    fn visible_to_absolute(&self, point: Point) -> AbsolutePoint;
     fn received_count(&mut self) -> &mut usize;
     fn suppress_chars(&mut self) -> &mut bool;
     fn last_modifiers(&mut self) -> &mut ModifiersState;
     fn change_font_size(&mut self, delta: i8);
     fn reset_font_size(&mut self);
+    fn move_visible_region_up(&mut self, lines: AbsoluteLine);
+    fn move_visible_region_down(&mut self, lines: AbsoluteLine);
+    fn jump_to_bottom(&mut self);
 }
 
 /// Describes a state and action to take in that state
@@ -170,6 +174,18 @@ pub enum Action {
 
     /// Quits Alacritty.
     Quit,
+
+    /// Scrolls up
+    ScrollUp,
+
+    /// Scrolls down
+    ScrollDown,
+
+    /// Scrolls a page up
+    PageUp,
+
+    /// Scrolls a page down
+    PageDown
 }
 
 impl Action {
@@ -177,6 +193,7 @@ impl Action {
     fn execute<A: ActionContext>(&self, ctx: &mut A) {
         match *self {
             Action::Esc(ref s) => {
+                ctx.jump_to_bottom();
                 ctx.write_to_pty(s.clone().into_bytes())
             },
             Action::Copy => {
@@ -222,11 +239,25 @@ impl Action {
             Action::ResetFontSize => {
                ctx.reset_font_size();
             }
+            Action::ScrollUp => {
+                ctx.move_visible_region_up(AbsoluteLine(1));
+            },
+            Action::ScrollDown => {
+                ctx.move_visible_region_down(AbsoluteLine(1));
+            },
+            Action::PageUp => {
+                let height = ctx.size_info().lines();
+                ctx.move_visible_region_up(height.to_absolute());
+            },
+            Action::PageDown => {
+                let height = ctx.size_info().lines();
+                ctx.move_visible_region_down(height.to_absolute());
+            }
         }
     }
 
     fn paste<A: ActionContext>(&self, ctx: &mut A, contents: String) {
-        if ctx.terminal_mode().contains(mode::BRACKETED_PASTE) {
+        if ctx.terminal_mode().contains(mode::TermMode::BRACKETED_PASTE) {
             ctx.write_to_pty(&b"\x1b[200~"[..]);
             ctx.write_to_pty(contents.into_bytes());
             ctx.write_to_pty(&b"\x1b[201~"[..]);
@@ -253,6 +284,8 @@ impl<'a, A: ActionContext + 'a> Processor<'a, A> {
             let prev_line = mem::replace(&mut self.ctx.mouse_mut().line, point.line);
             let prev_col = mem::replace(&mut self.ctx.mouse_mut().column, point.col);
 
+            let point = self.ctx.visible_to_absolute(point);
+
             let cell_x = (x as usize - size_info.padding_x as usize) % size_info.cell_width as usize;
             let half_cell_width = (size_info.cell_width / 2.0) as usize;
 
@@ -264,13 +297,10 @@ impl<'a, A: ActionContext + 'a> Processor<'a, A> {
             self.ctx.mouse_mut().cell_side = cell_side;
 
             if self.ctx.mouse_mut().left_button_state == ElementState::Pressed {
-                let report_mode = mode::MOUSE_REPORT_CLICK | mode::MOUSE_MOTION;
+                let report_mode = mode::TermMode::MOUSE_REPORT_CLICK | mode::TermMode::MOUSE_MOTION;
                 if !self.ctx.terminal_mode().intersects(report_mode) {
-                    self.ctx.update_selection(Point {
-                        line: point.line,
-                        col: point.col
-                    }, cell_side);
-                } else if self.ctx.terminal_mode().contains(mode::MOUSE_MOTION)
+                    self.ctx.update_selection(point, cell_side);
+                } else if self.ctx.terminal_mode().contains(mode::TermMode::MOUSE_MOTION)
                         // Only report motion when changing cells
                         && (
                             prev_line != self.ctx.mouse_mut().line
@@ -308,7 +338,7 @@ impl<'a, A: ActionContext + 'a> Processor<'a, A> {
     }
 
     pub fn mouse_report(&mut self, button: u8) {
-        if self.ctx.terminal_mode().contains(mode::SGR_MOUSE) {
+        if self.ctx.terminal_mode().contains(mode::TermMode::SGR_MOUSE) {
             let release = self.ctx.mouse_mut().left_button_state != ElementState::Pressed;
             self.sgr_mouse_report(button, release);
         } else {
@@ -318,12 +348,14 @@ impl<'a, A: ActionContext + 'a> Processor<'a, A> {
 
     pub fn on_mouse_double_click(&mut self) {
         if let Some(point) = self.ctx.mouse_coords() {
+            let point = self.ctx.visible_to_absolute(point);
             self.ctx.semantic_selection(point);
         }
     }
 
     pub fn on_mouse_triple_click(&mut self) {
         if let Some(point) = self.ctx.mouse_coords() {
+            let point = self.ctx.visible_to_absolute(point);
             self.ctx.line_selection(point);
         }
     }
@@ -343,7 +375,7 @@ impl<'a, A: ActionContext + 'a> Processor<'a, A> {
                 ClickState::TripleClick
             },
             _ => {
-                let report_modes = mode::MOUSE_REPORT_CLICK | mode::MOUSE_MOTION;
+                let report_modes = mode::TermMode::MOUSE_REPORT_CLICK | mode::TermMode::MOUSE_MOTION;
                 if self.ctx.terminal_mode().intersects(report_modes) {
                     self.mouse_report(0);
                     return;
@@ -356,7 +388,7 @@ impl<'a, A: ActionContext + 'a> Processor<'a, A> {
     }
 
     pub fn on_mouse_release(&mut self) {
-        if self.ctx.terminal_mode().intersects(mode::MOUSE_REPORT_CLICK | mode::MOUSE_MOTION) {
+        if self.ctx.terminal_mode().intersects(mode::TermMode::MOUSE_REPORT_CLICK | mode::TermMode::MOUSE_MOTION) {
             self.mouse_report(3);
             return;
         }
@@ -365,56 +397,78 @@ impl<'a, A: ActionContext + 'a> Processor<'a, A> {
     }
 
     pub fn on_mouse_wheel(&mut self, delta: MouseScrollDelta, phase: TouchPhase) {
-        let modes = mode::MOUSE_REPORT_CLICK | mode::MOUSE_MOTION | mode::SGR_MOUSE;
-        if !self.ctx.terminal_mode().intersects(modes) {
-            return;
-        }
+        let mut line_delta: isize = 0;
 
+        // handle scrolling
         match delta {
-            MouseScrollDelta::LineDelta(_columns, lines) => {
-                let to_scroll = self.ctx.mouse_mut().lines_scrolled + lines;
+            MouseScrollDelta::LineDelta(ref _columns, ref lines) => {
+                if *lines != 0.0 {
+                    line_delta = *lines as isize;
 
-                let code = if to_scroll > 0.0 {
-                    64
-                } else {
-                    65
-                };
+                    let scroll_sensitivity = 5.0;
+                    self.ctx.mouse_mut().scroll_line += lines * scroll_sensitivity;
+                    if self.ctx.mouse_mut().scroll_line.abs() > 1.0 {
+                        // get and reset the counter
+                        let amount_float = self.ctx.mouse_mut().scroll_line;
+                        self.ctx.mouse_mut().scroll_line = 0.0;
 
-                for _ in 0..(to_scroll.abs() as usize) {
-                    self.normal_mouse_report(code);
+                        let amount = AbsoluteLine(amount_float.abs().round() as usize);
+                        if amount_float > 0.0 {
+                            // scroll up
+                            self.ctx.move_visible_region_up(amount);
+                        } else {
+                            // scroll down
+                            self.ctx.move_visible_region_down(amount);
+                        }
+                    }
                 }
-                self.ctx.mouse_mut().lines_scrolled = to_scroll % 1.0;
             },
-            MouseScrollDelta::PixelDelta(_x, y) => {
+            MouseScrollDelta::PixelDelta(ref _x, ref y) => {
                 match phase {
                     TouchPhase::Started => {
                         // Reset offset to zero
                         self.ctx.mouse_mut().scroll_px = 0;
                     },
                     TouchPhase::Moved => {
-                        self.ctx.mouse_mut().scroll_px += y as i32;
+                        self.ctx.mouse_mut().scroll_px += *y as i32;
                         let height = self.ctx.size_info().cell_height as i32;
 
                         while self.ctx.mouse_mut().scroll_px.abs() >= height {
-                            let button = if self.ctx.mouse_mut().scroll_px > 0 {
+                            if self.ctx.mouse_mut().scroll_px > 0 {
+                                line_delta -= 1;
                                 self.ctx.mouse_mut().scroll_px -= height;
-                                64
+                                self.ctx.move_visible_region_up(AbsoluteLine(1));
                             } else {
+                                line_delta += 1;
                                 self.ctx.mouse_mut().scroll_px += height;
-                                65
+                                self.ctx.move_visible_region_down(AbsoluteLine(1));
                             };
-
-                            self.normal_mouse_report(button);
                         }
                     },
                     _ => (),
                 }
             }
         }
+
+        // we'll only report information about mouse events if the terminal wants it.
+        let modes = mode::TermMode::MOUSE_REPORT_CLICK | mode::TermMode::MOUSE_MOTION | mode::TermMode::SGR_MOUSE;
+        if !self.ctx.terminal_mode().intersects(modes) {
+            return;
+        }
+
+        let code = if line_delta > 0 {
+            64
+        } else {
+            65
+        };
+
+        for _ in 0..(line_delta.abs()) {
+            self.normal_mouse_report(code);
+        }
     }
 
     pub fn on_focus_change(&mut self, is_focused: bool) {
-        if self.ctx.terminal_mode().contains(mode::FOCUS_IN_OUT) {
+        if self.ctx.terminal_mode().contains(mode::TermMode::FOCUS_IN_OUT) {
             let chr = if is_focused {
                 "I"
             } else {
@@ -491,6 +545,7 @@ impl<'a, A: ActionContext + 'a> Processor<'a, A> {
             self.ctx.write_to_pty(bytes);
 
             *self.ctx.received_count() += 1;
+            self.ctx.jump_to_bottom();
         }
     }
 
@@ -541,7 +596,7 @@ mod tests {
     use term::{SizeInfo, Term, TermMode, mode};
     use event::{Mouse, ClickState};
     use config::{self, Config, ClickHandler};
-    use index::{Point, Side};
+    use index::{Point, AbsolutePoint, Side, AbsoluteLine};
     use selection::Selection;
 
     use super::{Action, Binding, Processor};
@@ -584,15 +639,15 @@ mod tests {
         }
 
         fn clear_selection(&mut self) {}
-        fn update_selection(&mut self, _point: Point, _side: Side) {}
-        fn simple_selection(&mut self, _point: Point, _side: Side) {}
+        fn update_selection(&mut self, _point: AbsolutePoint, _side: Side) {}
+        fn simple_selection(&mut self, _point: AbsolutePoint, _side: Side) {}
 
-        fn semantic_selection(&mut self, _point: Point) {
+        fn semantic_selection(&mut self, _point: AbsolutePoint) {
             // set something that we can check for here
             self.last_action = MultiClick::DoubleClick;
         }
 
-        fn line_selection(&mut self, _point: Point) {
+        fn line_selection(&mut self, _point: AbsolutePoint) {
             self.last_action = MultiClick::TripleClick;
         }
 
@@ -600,16 +655,26 @@ mod tests {
             self.terminal.pixels_to_coords(self.mouse.x as usize, self.mouse.y as usize)
         }
 
+        fn visible_to_absolute(&self, point: Point) -> AbsolutePoint {
+            AbsolutePoint {
+                line: point.line.to_absolute(),
+                col: point.col
+            }
+        }
+
         #[inline]
         fn mouse_mut(&mut self) -> &mut Mouse {
             self.mouse
         }
+
         fn received_count(&mut self) -> &mut usize {
             &mut self.received_count
         }
+
         fn suppress_chars(&mut self) -> &mut bool {
             &mut self.suppress_chars
         }
+        
         fn last_modifiers(&mut self) -> &mut ModifiersState {
             &mut self.last_modifiers
         }
@@ -617,6 +682,12 @@ mod tests {
         }
         fn reset_font_size(&mut self) {
         }
+
+        fn move_visible_region_up(&mut self, _: AbsoluteLine) {}
+
+        fn move_visible_region_down(&mut self, _: AbsoluteLine) {}
+        
+        fn jump_to_bottom(&mut self) {}
     }
 
     macro_rules! test_clickstate {
@@ -749,65 +820,65 @@ mod tests {
 
     test_process_binding! {
         name: process_binding_nomode_shiftmod_require_shift,
-        binding: Binding { trigger: KEY, mods: ModifiersState { shift: true, ctrl: false, alt: false, logo: false }, action: Action::from("\x1b[1;2D"), mode: mode::NONE, notmode: mode::NONE },
+        binding: Binding { trigger: KEY, mods: ModifiersState { shift: true, ctrl: false, alt: false, logo: false }, action: Action::from("\x1b[1;2D"), mode: mode::TermMode::NONE, notmode: mode::TermMode::NONE },
         triggers: true,
-        mode: mode::NONE,
+        mode: mode::TermMode::NONE,
         mods: ModifiersState { shift: true, ctrl: false, alt: false, logo: false }
     }
 
     test_process_binding! {
         name: process_binding_nomode_nomod_require_shift,
-        binding: Binding { trigger: KEY, mods: ModifiersState { shift: true, ctrl: false, alt: false, logo: false }, action: Action::from("\x1b[1;2D"), mode: mode::NONE, notmode: mode::NONE },
+        binding: Binding { trigger: KEY, mods: ModifiersState { shift: true, ctrl: false, alt: false, logo: false }, action: Action::from("\x1b[1;2D"), mode: mode::TermMode::NONE, notmode: mode::TermMode::NONE },
         triggers: false,
-        mode: mode::NONE,
+        mode: mode::TermMode::NONE,
         mods: ModifiersState { shift: false, ctrl: false, alt: false, logo: false }
     }
 
     test_process_binding! {
         name: process_binding_nomode_controlmod,
-        binding: Binding { trigger: KEY, mods: ModifiersState { ctrl: true, shift: false, alt: false, logo: false }, action: Action::from("\x1b[1;5D"), mode: mode::NONE, notmode: mode::NONE },
+        binding: Binding { trigger: KEY, mods: ModifiersState { ctrl: true, shift: false, alt: false, logo: false }, action: Action::from("\x1b[1;5D"), mode: mode::TermMode::NONE, notmode: mode::TermMode::NONE },
         triggers: true,
-        mode: mode::NONE,
+        mode: mode::TermMode::NONE,
         mods: ModifiersState { ctrl: true, shift: false, alt: false, logo: false }
     }
 
     test_process_binding! {
         name: process_binding_nomode_nomod_require_not_appcursor,
-        binding: Binding { trigger: KEY, mods: ModifiersState { shift: false, ctrl: false, alt: false, logo: false }, action: Action::from("\x1b[D"), mode: mode::NONE, notmode: mode::APP_CURSOR },
+        binding: Binding { trigger: KEY, mods: ModifiersState { shift: false, ctrl: false, alt: false, logo: false }, action: Action::from("\x1b[D"), mode: mode::TermMode::NONE, notmode: mode::TermMode::APP_CURSOR },
         triggers: true,
-        mode: mode::NONE,
+        mode: mode::TermMode::NONE,
         mods: ModifiersState { shift: false, ctrl: false, alt: false, logo: false }
     }
 
     test_process_binding! {
         name: process_binding_appcursormode_nomod_require_appcursor,
-        binding: Binding { trigger: KEY, mods: ModifiersState { shift: false, ctrl: false, alt: false, logo: false }, action: Action::from("\x1bOD"), mode: mode::APP_CURSOR, notmode: mode::NONE },
+        binding: Binding { trigger: KEY, mods: ModifiersState { shift: false, ctrl: false, alt: false, logo: false }, action: Action::from("\x1bOD"), mode: mode::TermMode::APP_CURSOR, notmode: mode::TermMode::NONE },
         triggers: true,
-        mode: mode::APP_CURSOR,
+        mode: mode::TermMode::APP_CURSOR,
         mods: ModifiersState { shift: false, ctrl: false, alt: false, logo: false }
     }
 
     test_process_binding! {
         name: process_binding_nomode_nomod_require_appcursor,
-        binding: Binding { trigger: KEY, mods: ModifiersState { shift: false, ctrl: false, alt: false, logo: false }, action: Action::from("\x1bOD"), mode: mode::APP_CURSOR, notmode: mode::NONE },
+        binding: Binding { trigger: KEY, mods: ModifiersState { shift: false, ctrl: false, alt: false, logo: false }, action: Action::from("\x1bOD"), mode: mode::TermMode::APP_CURSOR, notmode: mode::TermMode::NONE },
         triggers: false,
-        mode: mode::NONE,
+        mode: mode::TermMode::NONE,
         mods: ModifiersState { shift: false, ctrl: false, alt: false, logo: false }
     }
 
     test_process_binding! {
         name: process_binding_appcursormode_appkeypadmode_nomod_require_appcursor,
-        binding: Binding { trigger: KEY, mods: ModifiersState { shift: false, ctrl: false, alt: false, logo: false }, action: Action::from("\x1bOD"), mode: mode::APP_CURSOR, notmode: mode::NONE },
+        binding: Binding { trigger: KEY, mods: ModifiersState { shift: false, ctrl: false, alt: false, logo: false }, action: Action::from("\x1bOD"), mode: mode::TermMode::APP_CURSOR, notmode: mode::TermMode::NONE },
         triggers: true,
-        mode: mode::APP_CURSOR | mode::APP_KEYPAD,
+        mode: mode::TermMode::APP_CURSOR | mode::TermMode::APP_KEYPAD,
         mods: ModifiersState { shift: false, ctrl: false, alt: false, logo: false }
     }
 
     test_process_binding! {
         name: process_binding_fail_with_extra_mods,
-        binding: Binding { trigger: KEY, mods: ModifiersState { shift: false, ctrl: false, alt: false, logo: true }, action: Action::from("arst"), mode: mode::NONE, notmode: mode::NONE },
+        binding: Binding { trigger: KEY, mods: ModifiersState { shift: false, ctrl: false, alt: false, logo: true }, action: Action::from("arst"), mode: mode::TermMode::NONE, notmode: mode::TermMode::NONE },
         triggers: false,
-        mode: mode::NONE,
+        mode: mode::TermMode::NONE,
         mods: ModifiersState { shift: false, ctrl: false, alt: true, logo: true }
     }
 }
